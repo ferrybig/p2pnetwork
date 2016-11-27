@@ -82,7 +82,7 @@ public class Peer {
 	private final ConcurrentMap<Integer, Promise<PongPacket>> pingListeners = new ConcurrentHashMap<>();
 	private final AtomicInteger pingPacketCounter = new AtomicInteger();
 	private final List<SocketAddress> knownAddresses = new CopyOnWriteArrayList<>();
-	
+
 	private ScheduledFuture<?> sendRoutingUpdate;
 	//private final Map<Packet, Promise<Packet>> packetListeners ;
 	private final boolean peerExchange;
@@ -107,16 +107,16 @@ public class Peer {
 	}
 
 	public boolean routePacket(RelayPacket packet) {
-		LocalConnection router = routingTable.tryRoute(packet.getAddress(), this::getByAddress);
+		MultiConnection router = routingTable.tryRoute(packet.getAddress(), this::getByAddress);
 		if (router != null) {
-			router.sendPacket((RelayPacket)packet.retain()).addListener(ErrorLoggingFuture.SINGLETON);
+			router.sendPacket((RelayPacket) packet.retain()).addListener(ErrorLoggingFuture.SINGLETON);
 			return true;
 		}
 		return false;
 	}
 
 	public boolean routePacket(Address to, Packet packet, byte ttl) {
-		LocalConnection router = routingTable.tryRoute(to, this::getByAddress);
+		MultiConnection router = routingTable.tryRoute(to, this::getByAddress);
 
 		if (router != null) {
 			if (!(packet instanceof RelayPacket) && !router.getDirectNode().equals(to)) {
@@ -137,16 +137,16 @@ public class Peer {
 		}
 		return false;
 	}
-	
+
 	private void receivedPacket(ProcessedPacket msg) {
 		LOG.log(Level.INFO, "Received a {0}", msg);
-		if(msg.getPacket() instanceof PongPacket) {
+		if (msg.getPacket() instanceof PongPacket) {
 			// TODO
 		}
 	}
-	
+
 	public boolean routePacket(Address to, Packet packet) {
-		return routePacket(to, packet, (byte)127);
+		return routePacket(to, packet, (byte) 127);
 	}
 
 	public ChannelFuture startIncomingConnectionThread(int port) {
@@ -186,7 +186,7 @@ public class Peer {
 		sendRoutingUpdate = group.schedule(this::sendRoutingTable,
 			ThreadLocalRandom.current().nextInt(4 * m) + 3 * m, TimeUnit.MILLISECONDS);
 	}
-	
+
 	public Future<?> pingAddress(Address addr) {
 		int packetNumber = pingPacketCounter.getAndIncrement();
 		byte[] data = new byte[4];
@@ -198,7 +198,7 @@ public class Peer {
 		pingListeners.put(packetNumber, promise);
 		promise.addListener(e -> pingListeners.remove(packetNumber));
 		boolean send = routePacket(addr, new PingPacket(data));
-		if(!send) {
+		if (!send) {
 			promise.setFailure(new IllegalArgumentException("Unknown address"));
 		}
 		return promise;
@@ -206,9 +206,9 @@ public class Peer {
 
 	private synchronized void sendRoutingTable() {
 		Packet packet = new RoutingUpdatePacket(this.routingTable.generateDelegatedRoutingMap());
-		LOG.log(Level.INFO, "Broadcasting routing map!" + packet);
+		LOG.log(Level.INFO, "Broadcasting routing map!{0}", packet);
 		try {
-			for (LocalConnection c : this.localConnectionMap.values()) {
+			for (MultiConnection c : this.localConnectionMap.values()) {
 				c.sendPacket((Packet) packet.retain());
 			}
 		} finally {
@@ -220,7 +220,16 @@ public class Peer {
 		if (con == null) {
 			return;
 		}
-		localConnectionMap.remove(con.getDirectNode(), con);
+		MultiConnection existing = localConnectionMap.get(con.getDirectNode());
+		if (existing == null) {
+			return;
+		}
+		synchronized (existing) {
+			existing.remove(con);
+			if (existing.isEmpty()) {
+				localConnectionMap.remove(con.getDirectNode(), existing);
+			}
+		}
 
 	}
 
@@ -239,7 +248,7 @@ public class Peer {
 		});
 	}
 
-	private static class ErrorLoggingFuture implements GenericFutureListener<Future<? super Void>> {
+	private static class ErrorLoggingFuture implements GenericFutureListener<Future<Object>> {
 
 		public static final ErrorLoggingFuture SINGLETON = new ErrorLoggingFuture();
 
@@ -247,7 +256,7 @@ public class Peer {
 		}
 
 		@Override
-		public void operationComplete(Future<? super Void> e) throws Exception {
+		public void operationComplete(Future<Object> e) throws Exception {
 			if (e.cause() != null) {
 				LOG.log(Level.WARNING, "Exception: {0}", e.cause());
 			}
@@ -315,19 +324,30 @@ public class Peer {
 			LOG.log(Level.INFO, "{0} Opened connection to {1}", new Object[]{chn, remote});
 			LocalConnection con = new LocalConnection(!incoming, remote, address, chn, knownRemote);
 			connections.put(chn, con);
-			LocalConnection old = localConnectionMap.put(remote, con);
-			if (old != null) {
-				old.close();
-			}
+			MultiConnection old = localConnectionMap.compute(remote, (a, e) -> {
+				if(e == null) {
+					e = new MultiConnection(remote, address, events, con);
+				} else {
+					synchronized (e) {
+						if (e.isEmpty()) {
+							e = new MultiConnection(remote, address, events, con);
+						} else {
+							e.add(con);
+						}
+					}
+				}
+				return e;
+			});
+			
 			chn.pipeline().addLast(new PacketRoutingHandler(address, routingTable, Peer.this::routePacket));
 			//chn.pipeline().addLast(new LoggingHandler(LogLevel.INFO));
 			chn.pipeline().addLast(new PacketPreProcessor(remote));
 			chn.pipeline().addLast(new PacketHandler(con, Peer.this::receivedPacket));
-			con.addRoutingChangedListener(Peer.this::rebuildRouting);
+			old.addRoutingChangedListener(Peer.this::rebuildRouting);
 			Peer.this.rebuildRouting();
 			// TODO: cache this
 			con.sendPacket(new RoutingUpdatePacket(routingTable.generateDelegatedRoutingMap()))
-				.addListener(ErrorLoggingFuture.SINGLETON); 
+				.addListener(ErrorLoggingFuture.SINGLETON);
 		}
 
 		@Override

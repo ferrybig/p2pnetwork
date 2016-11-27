@@ -34,9 +34,9 @@ public class MultiConnection {
 	private final Consumer<Map<Address, Byte>> routingChangeListener = new Consumer<Map<Address, Byte>>() {
 		@Override
 		public void accept(Map<Address, Byte> e) {
-			if(!e.equals(knownDestinations)) {
+			if (!e.equals(knownDestinations)) {
 				knownDestinations = e;
-				for(Runnable r : routingChangedListeners) {
+				for (Runnable r : routingChangedListeners) {
 					r.run();
 				}
 			}
@@ -87,6 +87,14 @@ public class MultiConnection {
 		}
 	}
 
+	public boolean addRoutingChangedListener(Runnable e) {
+		return routingChangedListeners.add(e);
+	}
+
+	public boolean removeRoutingChangedListener(Runnable o) {
+		return routingChangedListeners.remove(o);
+	}
+
 	public Address getDirectNode() {
 		return directNode;
 	}
@@ -97,10 +105,6 @@ public class MultiConnection {
 
 	public Set<Address> getBlocked() {
 		return blocked;
-	}
-
-	public List<Runnable> getRoutingChangedListeners() {
-		return routingChangedListeners;
 	}
 
 	public ConnectionList getConnections() {
@@ -156,6 +160,10 @@ public class MultiConnection {
 	@Nullable
 	public LocalConnection getAny() {
 		return this.connections.getNext();
+	}
+
+	boolean isEmpty() {
+		return this.connections.size == 0;
 	}
 
 	private static class ConnectionList {
